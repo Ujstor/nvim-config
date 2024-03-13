@@ -1,1 +1,1 @@
-curl -sSL https://github.com/Ujstor/nvim-config/install.sh | bash -s
+curl -sSL https://raw.githubusercontent.com/Ujstor/nvim-config/main/install.sh | bash
