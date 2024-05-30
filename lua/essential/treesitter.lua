@@ -6,7 +6,7 @@ return { -- Highlight, edit, and navigate code
 
     ---@diagnostic disable-next-line: missing-fields
     require('nvim-treesitter.configs').setup {
-      ensure_installed = { 'bash', 'c', 'html', 'lua', 'markdown', 'vim', 'vimdoc', 'go' },
+      ensure_installed = { 'bash', 'c', 'html', 'lua', 'markdown', 'vim', 'vimdoc', 'go', 'hcl', 'python' },
       -- Autoinstall languages that are not installed
       auto_install = true,
       highlight = { enable = true },
