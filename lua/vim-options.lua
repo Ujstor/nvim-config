@@ -55,3 +55,9 @@ vim.keymap.set('n', '<C-j>', '<C-w><C-j>', { desc = 'Move focus to the lower win
 vim.keymap.set('n', '<C-k>', '<C-w><C-k>', { desc = 'Move focus to the upper window' })
 
 vim.keymap.set('n', '<Leader>e', '<Cmd>Neotree toggle<CR>', { desc = 'Neotree file explorer' })
+
+-- Map keys for opening/closing Copilot Chat window
+vim.api.nvim_set_keymap('n', '<leader>cc', ':CopilotChatToggle<CR>', { noremap = true, silent = true })
+vim.api.nvim_set_keymap('n', '<leader>co', ':CopilotChatOpen<CR>', { noremap = true, silent = true })
+vim.api.nvim_set_keymap('n', '<leader>ccr', ':CopilotChatReset<CR>', { noremap = true, silent = true })
+vim.api.nvim_set_keymap('n', '<leader>cs', ':CopilotChatStop<CR>', { noremap = true, silent = true })
