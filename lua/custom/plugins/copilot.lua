@@ -1,18 +1,16 @@
 return {
-  {
-    'CopilotC-Nvim/CopilotChat.nvim',
-    branch = 'canary',
-    dependencies = {
-      { 'zbirenbaum/copilot.lua' }, -- or github/copilot.vim
-      { 'nvim-lua/plenary.nvim' }, -- for curl, log wrapper
-      config = function()
-        require('copilot').setup {}
-      end,
-    },
-    opts = {
-      debug = true, -- Enable debugging
-      -- See Configuration section for rest
-    },
-    -- See Commands section for default commands if you want to lazy load on them
-  },
+	"github/copilot.vim",
+	-- disable copilot by default
+	lazy = true,
+	keys = { "<leader>ce" },
+	config = function()
+		vim.cmd("Copilot setup") -- Line I added
+
+		vim.keymap.set("i", "<C-j>", 'copilot#Accept("\\<CR>")', {
+			expr = true,
+			replace_keycodes = false,
+		})
+		vim.keymap.set("n", "<leader>cd", ":Copilot disable <CR>", {})
+		vim.keymap.set("n", "<leader>ce", ":Copilot enable <CR>", {})
+	end,
 }
