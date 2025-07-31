@@ -68,13 +68,19 @@ require('lazy').setup {
         return ''
       end
 
+      -- Current scope indentation highlighting
+      require('mini.indentscope').setup {
+        symbol = '│',
+        options = { try_as_border = true },
+      }
+
       -- ... and there is more!
       --  Check out: https://github.com/echasnovski/mini.nvim
     end,
   },
 
   require 'kickstart.plugins.debug',
-  -- require 'kickstart.plugins.indent_line',
+  require 'kickstart.plugins.indent_line',
   { import = 'custom.plugins' },
   { import = 'essential' },
 }
