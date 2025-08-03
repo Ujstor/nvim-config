@@ -14,8 +14,7 @@ return { -- Highlight, edit, and navigate code
         'vimdoc',
         'markdown',
         'markdown_inline',
-
-        -- DevOps & Infrastructure as Code
+        'diff',
         'hcl', -- Terraform
         'terraform', -- Terraform specific
         'dockerfile', -- Docker
@@ -24,51 +23,30 @@ return { -- Highlight, edit, and navigate code
         'jsonc', -- JSON with comments
         'toml', -- Configuration files
         'ini', -- Configuration files
-
-        -- Cloud & Kubernetes
         'helm', -- Helm charts
-
-        -- Programming languages for scripts/tools
         'go', -- Go applications, tools
         'python', -- Scripts, automation
         'javascript', -- Node.js tools
         'typescript', -- Modern JS tooling
-
-        -- Web technologies (for dashboards, frontends)
         'html',
         'css',
-
-        -- CI/CD & Automation
         'make', -- Makefiles
         'cmake', -- Build systems
-
-        -- Version Control & Git
         'git_config',
         'git_rebase',
         'gitattributes',
         'gitcommit',
         'gitignore',
-
-        -- Shell & System
         'fish', -- Fish shell
         'tmux', -- Tmux config
         'ssh_config', -- SSH configuration
-
-        -- Data formats
         'csv', -- Data processing
         'xml', -- Configuration files
-
-        -- Security & Compliance
         'proto', -- Protocol buffers
         'sql', -- Database queries
-
-        -- Documentation
         'rst', -- reStructuredText
-
-        -- Optional but useful for DevOps
         'nginx', -- Nginx configuration
         'groovy', -- Jenkins pipelines
-        -- Note: Ansible syntax highlighting comes via yaml parser
       },
 
       -- Autoinstall languages that are not installed
