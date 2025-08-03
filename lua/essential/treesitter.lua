@@ -61,7 +61,15 @@ return { -- Highlight, edit, and navigate code
           if ok and stats and stats.size > max_filesize then
             return true
           end
+          
+          -- Also disable for buffers with too many lines to prevent out of range errors
+          local line_count = vim.api.nvim_buf_line_count(buf)
+          if line_count > 5000 then
+            return true
+          end
         end,
+        -- Add additional stability options
+        additional_vim_regex_highlighting = false,
       },
 
       indent = { enable = true },
