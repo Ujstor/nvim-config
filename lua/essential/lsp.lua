@@ -136,31 +136,18 @@ return { -- LSP Configuration & Plugins
         -- Add other linters/formatters here
       },
     }
-    -- Configure specific servers manually (required when automatic_enable = false)
+    -- Configure LSP capabilities for nvim-cmp completion
     local capabilities = require('cmp_nvim_lsp').default_capabilities()
-    local lspconfig = require 'lspconfig'
-    -- Set up all the servers with default capabilities
-    local servers = {
-      'clangd',
-      'gopls',
-      'ansiblels',
-      'bashls',
-      'dockerls',
-      'docker_compose_language_service',
-      'ts_ls',
-      'pyright',
-      'rust_analyzer',
-      'marksman',
-      'terraformls',
-    }
-    -- Setup each server with default config
-    for _, server in ipairs(servers) do
-      lspconfig[server].setup {
-        capabilities = capabilities,
-      }
-    end
-    -- Lua language server with custom settings
-    lspconfig.lua_ls.setup {
+
+    -- Set default capabilities for all LSP servers
+    -- Note: mason-lspconfig with automatic_enable = true will automatically
+    -- call vim.lsp.enable() for all installed servers
+    vim.lsp.config('*', {
+      capabilities = capabilities,
+    })
+
+    -- Configure lua_ls with custom settings for Neovim development
+    vim.lsp.config.lua_ls = {
       capabilities = capabilities,
       settings = {
         Lua = {
