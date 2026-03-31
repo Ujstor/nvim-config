@@ -68,6 +68,11 @@ return { -- Highlight, edit, and navigate code
             return true
           end
 
+          -- markdown_inline injection queries crash on Neovim 0.12 (nil node in get_range)
+          if lang == 'markdown' or lang == 'markdown_inline' then
+            return true
+          end
+
           -- Guard against parsers that return nil (Neovim 0.12 breaking change)
           local parser_ok = pcall(vim.treesitter.get_parser, buf, lang)
           if not parser_ok then
