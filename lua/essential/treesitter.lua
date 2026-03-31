@@ -23,7 +23,7 @@ return { -- Highlight, edit, and navigate code
         'jsonc', -- JSON with comments
         'toml', -- Configuration files
         'ini', -- Configuration files
-        'helm', -- Helm charts
+        -- 'helm', -- Disabled: causes injection query nil node errors (treesitter bug)
         'go', -- Go applications, tools
         'python', -- Scripts, automation
         'javascript', -- Node.js tools
