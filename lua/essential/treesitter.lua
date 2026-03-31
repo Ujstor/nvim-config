@@ -54,36 +54,33 @@ return { -- Highlight, edit, and navigate code
 
       highlight = {
         enable = true,
-        -- Disable for very large files to maintain performance
         disable = function(lang, buf)
+          -- Disable for very large files
           local max_filesize = 100 * 1024 -- 100 KB
           local ok, stats = pcall(vim.uv.fs_stat, vim.api.nvim_buf_get_name(buf))
           if ok and stats and stats.size > max_filesize then
             return true
           end
-          
-          -- Also disable for buffers with too many lines to prevent out of range errors
+
+          -- Disable for buffers with too many lines
           local line_count = vim.api.nvim_buf_line_count(buf)
           if line_count > 5000 then
             return true
           end
+
+          -- Guard against parsers that return nil (Neovim 0.12 breaking change)
+          local parser_ok = pcall(vim.treesitter.get_parser, buf, lang)
+          if not parser_ok then
+            return true
+          end
         end,
-        -- Add additional stability options
         additional_vim_regex_highlighting = false,
       },
 
       indent = { enable = true },
 
-      -- Enable incremental selection (useful for editing complex configs)
-      incremental_selection = {
-        enable = true,
-        keymaps = {
-          init_selection = 'gnn',
-          node_incremental = 'grn',
-          scope_incremental = 'grc',
-          node_decremental = 'grm',
-        },
-      },
+      -- Disabled: incremental_selection triggers nil node errors on Neovim 0.12
+      incremental_selection = { enable = false },
     }
 
     -- There are additional nvim-treesitter modules that you can use to interact
