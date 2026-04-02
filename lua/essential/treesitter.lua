@@ -3,6 +3,14 @@ return {
   branch = 'main',
   build = ':TSUpdate',
   config = function()
+    -- nvim-treesitter main branch stores bundled queries in runtime/queries/
+    -- but lazy.nvim only adds the plugin root to rtp, not the runtime/ subdir.
+    -- Add it explicitly so queries are found before :TSUpdate installs them to site/.
+    local ts_runtime = vim.fn.stdpath 'data' .. '/lazy/nvim-treesitter/runtime'
+    if vim.fn.isdirectory(ts_runtime) == 1 then
+      vim.opt.rtp:append(ts_runtime)
+    end
+
     require('nvim-treesitter').setup {
       ensure_installed = {
         'bash',

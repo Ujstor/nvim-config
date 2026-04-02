@@ -4,7 +4,11 @@ return {
     'nvim-treesitter/nvim-treesitter',
     'nvim-tree/nvim-web-devicons',
   },
-  -- Disabled until nvim-treesitter main branch is installed (:Lazy sync + :TSUpdate)
-  -- ft = { 'markdown' } triggers loading which crashes with nvim-treesitter master on Neovim 0.12
-  enabled = false,
+  ft = { 'markdown' },
+  opts = {},
+  keys = {
+    { '<leader>me', '<cmd>RenderMarkdown enable<cr>', desc = '[M]arkdown [E]nable' },
+    { '<leader>md', '<cmd>RenderMarkdown disable<cr>', desc = '[M]arkdown [D]isable' },
+    { '<leader>mt', '<cmd>RenderMarkdown toggle<cr>', desc = '[M]arkdown [T]oggle' },
+  },
 }
