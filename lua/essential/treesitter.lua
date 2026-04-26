@@ -11,6 +11,44 @@ return {
       vim.opt.rtp:append(ts_runtime)
     end
 
+    -- Shim removed APIs from nvim-treesitter master so plugins (telescope, etc.)
+    -- written against the old API keep working on the main-branch rewrite.
+    local parsers_ok, parsers = pcall(require, 'nvim-treesitter.parsers')
+    if parsers_ok and not parsers.ft_to_lang then
+      parsers.ft_to_lang = function(ft)
+        return vim.treesitter.language.get_lang(ft) or ft
+      end
+      parsers.get_buf_lang = function(bufnr)
+        local ft = vim.bo[bufnr or 0].filetype
+        return vim.treesitter.language.get_lang(ft) or ft
+      end
+      parsers.has_parser = function(lang)
+        lang = lang or vim.treesitter.language.get_lang(vim.bo.filetype) or ''
+        return pcall(vim.treesitter.language.add, lang)
+      end
+    end
+
+    -- nvim-treesitter.configs is gone on main; provide a stub so plugins that
+    -- call configs.is_enabled('highlight', ...) get a sensible answer.
+    if not package.loaded['nvim-treesitter.configs'] then
+      package.loaded['nvim-treesitter.configs'] = {
+        is_enabled = function(mod, lang, bufnr)
+          if mod ~= 'highlight' then
+            return false
+          end
+          bufnr = bufnr or 0
+          lang = lang or vim.treesitter.language.get_lang(vim.bo[bufnr].filetype) or ''
+          if lang == '' then
+            return false
+          end
+          local ok = pcall(vim.treesitter.language.add, lang)
+          return ok
+        end,
+        get_module = function() return nil end,
+        setup = function() end,
+      }
+    end
+
     require('nvim-treesitter').setup {
       ensure_installed = {
         'bash',
