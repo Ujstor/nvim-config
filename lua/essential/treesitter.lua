@@ -44,56 +44,27 @@ return {
           local ok = pcall(vim.treesitter.language.add, lang)
           return ok
         end,
-        get_module = function() return nil end,
+        get_module = function()
+          return nil
+        end,
         setup = function() end,
       }
     end
 
-    require('nvim-treesitter').setup {
-      ensure_installed = {
-        'bash',
-        'c',
-        'lua',
-        'vim',
-        'vimdoc',
-        'markdown',
-        'markdown_inline',
-        'diff',
-        'hcl',
-        'terraform',
-        'dockerfile',
-        'yaml',
-        'json',
-        'jsonc',
-        'toml',
-        'ini',
-        'go',
-        'python',
-        'javascript',
-        'typescript',
-        'html',
-        'css',
-        'make',
-        'cmake',
-        'git_config',
-        'git_rebase',
-        'gitattributes',
-        'gitcommit',
-        'gitignore',
-        'fish',
-        'tmux',
-        'ssh_config',
-        'csv',
-        'xml',
-        'proto',
-        'sql',
-        'rst',
-        'nginx',
-        'groovy',
-      },
+    require('nvim-treesitter').setup {}
 
-      auto_install = true,
-    }
+    -- main branch dropped `ensure_installed` / `auto_install` from setup().
+    -- Install any missing parsers ourselves by checking the runtime path.
+    local ensure_installed = require 'parsers'
+    local missing = {}
+    for _, lang in ipairs(ensure_installed) do
+      if #vim.api.nvim_get_runtime_file('parser/' .. lang .. '.so', false) == 0 then
+        table.insert(missing, lang)
+      end
+    end
+    if #missing > 0 then
+      require('nvim-treesitter').install(missing)
+    end
 
     -- Highlight and indent are now controlled by neovim natively (0.12+)
     -- nvim-treesitter main branch no longer manages these via configs module
