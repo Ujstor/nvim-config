@@ -12,7 +12,6 @@ return {
   'dockerfile',
   'yaml',
   'json',
-  'jsonc',
   'toml',
   'ini',
   'go',
