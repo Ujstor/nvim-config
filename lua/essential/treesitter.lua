@@ -13,20 +13,36 @@ return {
 
     -- Shim removed APIs from nvim-treesitter master so plugins (telescope, etc.)
     -- written against the old API keep working on the main-branch rewrite.
-    local parsers_ok, parsers = pcall(require, 'nvim-treesitter.parsers')
-    if parsers_ok and not parsers.ft_to_lang then
-      parsers.ft_to_lang = function(ft)
-        return vim.treesitter.language.get_lang(ft) or ft
+    -- Why a function + autocmd: install.lua does `package.loaded['nvim-treesitter.parsers'] = nil`
+    -- after every parser install/update and fires User TSUpdate, which wipes shims set once.
+    local function apply_parsers_shim()
+      local ok, parsers = pcall(require, 'nvim-treesitter.parsers')
+      if not ok then
+        return
       end
-      parsers.get_buf_lang = function(bufnr)
-        local ft = vim.bo[bufnr or 0].filetype
-        return vim.treesitter.language.get_lang(ft) or ft
+      if not parsers.ft_to_lang then
+        parsers.ft_to_lang = function(ft)
+          return vim.treesitter.language.get_lang(ft) or ft
+        end
       end
-      parsers.has_parser = function(lang)
-        lang = lang or vim.treesitter.language.get_lang(vim.bo.filetype) or ''
-        return pcall(vim.treesitter.language.add, lang)
+      if not parsers.get_buf_lang then
+        parsers.get_buf_lang = function(bufnr)
+          local ft = vim.bo[bufnr or 0].filetype
+          return vim.treesitter.language.get_lang(ft) or ft
+        end
+      end
+      if not parsers.has_parser then
+        parsers.has_parser = function(lang)
+          lang = lang or vim.treesitter.language.get_lang(vim.bo.filetype) or ''
+          return pcall(vim.treesitter.language.add, lang)
+        end
       end
     end
+    apply_parsers_shim()
+    vim.api.nvim_create_autocmd('User', {
+      pattern = 'TSUpdate',
+      callback = apply_parsers_shim,
+    })
 
     -- nvim-treesitter.configs is gone on main; provide a stub so plugins that
     -- call configs.is_enabled('highlight', ...) get a sensible answer.
