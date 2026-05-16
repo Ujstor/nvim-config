@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/Ujstor/nvim-config.git"
 NVIM_URL="https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.tar.gz"
-TREE_SITTER_VERSION="v0.26.8"
+TREE_SITTER_VERSION="0.26.8"
 
 need_sudo() {
     if [ "$(id -u)" -eq 0 ]; then
@@ -26,7 +26,7 @@ install_pkgs() {
     fi
 }
 
-# 1. Prerequisites: compiler, make, git, curl, ripgrep, fd, unzip
+# 1. Prerequisites: compiler, make, git, curl, ripgrep, fd, unzip, clang (for tree-sitter cargo build)
 missing_pkgs=()
 command -v cc      >/dev/null 2>&1 || missing_pkgs+=(build-essential)
 command -v make    >/dev/null 2>&1 || missing_pkgs+=(make)
@@ -34,6 +34,8 @@ command -v git     >/dev/null 2>&1 || missing_pkgs+=(git)
 command -v curl    >/dev/null 2>&1 || missing_pkgs+=(curl)
 command -v rg      >/dev/null 2>&1 || missing_pkgs+=(ripgrep)
 command -v unzip   >/dev/null 2>&1 || missing_pkgs+=(unzip)
+command -v clang   >/dev/null 2>&1 || missing_pkgs+=(clang libclang-dev pkg-config libssl-dev)
+
 # fd is `fd-find` on Debian/Ubuntu, `fd` elsewhere
 if ! command -v fd >/dev/null 2>&1 && ! command -v fdfind >/dev/null 2>&1; then
     if command -v apt-get >/dev/null 2>&1; then
@@ -48,20 +50,21 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
     install_pkgs "${missing_pkgs[@]}"
 fi
 
-# 2. tree-sitter CLI (required by nvim-treesitter main branch to compile parsers)
+# 2. tree-sitter CLI (compiled via cargo for glibc compatibility across distros)
 if ! command -v tree-sitter >/dev/null 2>&1; then
-    echo "Installing tree-sitter CLI ${TREE_SITTER_VERSION}"
-    arch=$(uname -m)
-    case "$arch" in
-        x86_64)         ts_arch=x64 ;;
-        aarch64|arm64)  ts_arch=arm64 ;;
-        *) echo "Unsupported arch for tree-sitter: $arch"; exit 1 ;;
-    esac
-    ts_tmp=$(mktemp -d)
-    curl -sSL "https://github.com/tree-sitter/tree-sitter/releases/download/${TREE_SITTER_VERSION}/tree-sitter-linux-${ts_arch}.gz" -o "$ts_tmp/tree-sitter.gz"
-    gunzip -f "$ts_tmp/tree-sitter.gz"
-    need_sudo install -m 755 "$ts_tmp/tree-sitter" /usr/local/bin/tree-sitter
-    rm -rf "$ts_tmp"
+    echo "Installing Rust toolchain (if missing)"
+    if ! command -v cargo >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+    fi
+    # shellcheck disable=SC1091
+    [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
+    echo "Installing tree-sitter CLI ${TREE_SITTER_VERSION} via cargo (this takes a few minutes)"
+    cargo install --locked tree-sitter-cli --version "${TREE_SITTER_VERSION}"
+
+    # Make it available system-wide for headless nvim later in the script
+    need_sudo ln -sf "$HOME/.cargo/bin/tree-sitter" /usr/local/bin/tree-sitter
 fi
 
 # 3. Remove any prior neovim install
