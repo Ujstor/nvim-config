@@ -37,6 +37,11 @@ return {
           return pcall(vim.treesitter.language.add, lang)
         end
       end
+      if not parsers.get_parser then
+        parsers.get_parser = function(bufnr, lang)
+          return vim.treesitter.get_parser(bufnr, lang)
+        end
+      end
     end
     apply_parsers_shim()
     vim.api.nvim_create_autocmd('User', {
@@ -60,7 +65,10 @@ return {
           local ok = pcall(vim.treesitter.language.add, lang)
           return ok
         end,
-        get_module = function()
+        get_module = function(mod)
+          if mod == 'highlight' then
+            return { additional_vim_regex_highlighting = false }
+          end
           return nil
         end,
         setup = function() end,
