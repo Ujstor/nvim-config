@@ -39,7 +39,16 @@ return {
       end
       if not parsers.get_parser then
         parsers.get_parser = function(bufnr, lang)
-          return vim.treesitter.get_parser(bufnr, lang)
+          -- nvim 0.12: get_parser now returns (nil, err) instead of throwing.
+          -- Telescope's previewer passes the result straight into
+          -- vim.treesitter.highlighter.new(), which then crashes with
+          -- `attempt to index local 'tree' (a nil value)` at highlighter.lua:95.
+          -- Restore the old "throw on failure" contract so callers can't hit that.
+          local parser, err = vim.treesitter.get_parser(bufnr, lang)
+          if not parser then
+            error(err or ('no treesitter parser for buffer ' .. tostring(bufnr)))
+          end
+          return parser
         end
       end
     end
@@ -62,8 +71,15 @@ return {
           if lang == '' then
             return false
           end
-          local ok = pcall(vim.treesitter.language.add, lang)
-          return ok
+          if not pcall(vim.treesitter.language.add, lang) then
+            return false
+          end
+          -- Also confirm a parser can actually be built for this buffer.
+          -- Telescope's previewer calls is_enabled and then immediately calls
+          -- get_parser; on nvim 0.12 that can return nil mid-keystroke, which
+          -- then crashes vim.treesitter.highlighter.new(nil).
+          local ok, parser = pcall(vim.treesitter.get_parser, bufnr, lang)
+          return ok and parser ~= nil
         end,
         get_module = function(mod)
           if mod == 'highlight' then
