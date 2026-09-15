@@ -28,7 +28,6 @@ return {
   'gitcommit',
   'gitignore',
   'fish',
-  'tmux',
   'ssh_config',
   'csv',
   'xml',

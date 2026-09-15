@@ -95,10 +95,14 @@ return {
 
     -- main branch dropped `ensure_installed` / `auto_install` from setup().
     -- Install any missing parsers ourselves by checking the runtime path.
+    -- Names absent from nvim-treesitter's registry are skipped here: they can
+    -- never install, so they'd otherwise be re-attempted on every startup and
+    -- log "skipping unsupported language: <name>" each time.
+    local registry = require 'nvim-treesitter.parsers'
     local ensure_installed = require 'parsers'
     local missing = {}
     for _, lang in ipairs(ensure_installed) do
-      if #vim.api.nvim_get_runtime_file('parser/' .. lang .. '.so', false) == 0 then
+      if registry[lang] ~= nil and #vim.api.nvim_get_runtime_file('parser/' .. lang .. '.so', false) == 0 then
         table.insert(missing, lang)
       end
     end
