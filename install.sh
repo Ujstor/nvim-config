@@ -165,14 +165,27 @@ as_root() {
 # question that matters is "does execve() work on a file I just wrote here", so
 # that is the question this asks.
 #
-# Candidates, in order; the first that passes the probe wins:
+# Candidates, in order; the first that passes BOTH probes wins:
 #
-#     $TMPDIR -> /tmp -> $XDG_RUNTIME_DIR -> $XDG_CACHE_HOME/nvim-config/exec
-#             -> $HOME/.cache/nvim-config/exec
+#     $TMPDIR -> /tmp -> $XDG_CACHE_HOME/nvim-config/exec
+#             -> $HOME/.cache/nvim-config/exec -> $XDG_RUNTIME_DIR
 #
-# The last two are under $HOME on purpose: they are the fallback for the host
-# where every shared temp filesystem is noexec. The EXIT trap removes whatever
-# was created, including a parent this script had to make.
+# The two $HOME entries sit AHEAD of $XDG_RUNTIME_DIR on purpose, and that
+# ordering is the whole point of the second probe. A runtime dir passes the exec
+# probe but is a tmpfs sized against RAM (10% of it under stock systemd), so a
+# cargo build there both runs out of room and eats the memory the compiler
+# needs. On a 1 GiB guest whose /run/user/1000 is 94 MiB, falling back to it
+# turned a noexec /tmp into an OOM-killed rustc:
+#     error: could not compile `regex-syntax` (lib)
+#     Caused by: process didn't exit successfully: `rustc ...` (signal: 9, SIGKILL)
+# $HOME is disk-backed and is the honest place for a multi-hundred-MiB build
+# tree; $XDG_RUNTIME_DIR stays last as a genuine last resort, for the host where
+# $HOME is mounted noexec too.
+#
+# Hence exec_space_ok: a candidate that executes but is too cramped is
+# remembered and used ONLY if nothing roomier answers, and it says so. Silently
+# building in 94 MiB of RAM is the failure this avoids. The EXIT trap removes
+# whatever was created, including a parent this script had to make.
 
 EXEC_ROOT=""
 EXEC_DIR=""
@@ -211,6 +224,23 @@ exec_probe() {
 	[ "$rc" -eq 41 ]
 }
 
+# Free space the tree-sitter build actually needs. cargo's target tree for
+# tree-sitter-cli 0.26 runs to a few hundred MiB; rustup-init wants far less.
+# 1 GiB is a floor that separates a real scratch filesystem from a runtime
+# tmpfs — it is a preference between candidates, not a reservation.
+EXEC_MIN_KIB=1048576
+
+# exec_space_ok DIR — 0 when DIR's filesystem has at least $EXEC_MIN_KIB free.
+# `df -Pk` is the portable spelling; -P keeps one line per filesystem even when
+# the device name is long. An unreadable df counts as roomy: this ranks
+# candidates, and it must never be the thing that strands a run with no scratch.
+exec_space_ok() {
+	local dir="${1-}" avail
+	avail="$(df -Pk -- "$dir" 2>/dev/null | awk 'NR==2 {print $4}')" || return 0
+	[ -n "$avail" ] || return 0
+	[ "$avail" -ge "$EXEC_MIN_KIB" ]
+}
+
 # exec_root_init — sets $EXEC_ROOT to the per-run exec-capable root, probing for
 # it on first use. Returns 1, having said why, when nothing on this host executes.
 # Says out loud, ONCE, when it had to fall off /tmp. A SILENT fallback is exactly
@@ -221,10 +251,11 @@ exec_root_init() {
 	# An array, not a " $tried " string: a `case " $tried " in *" $c "*` test reads
 	# a path containing a space as two candidates and would skip a good directory
 	# because an unrelated one shared a word with it.
-	local cand root="" s dup
+	local cand root="" cramped="" s dup
 	local -a tried=()
-	for cand in "${TMPDIR:-}" /tmp "${XDG_RUNTIME_DIR:-}" \
-		"${XDG_CACHE_HOME:-$HOME/.cache}/nvim-config/exec" "$HOME/.cache/nvim-config/exec"; do
+	for cand in "${TMPDIR:-}" /tmp \
+		"${XDG_CACHE_HOME:-$HOME/.cache}/nvim-config/exec" "$HOME/.cache/nvim-config/exec" \
+		"${XDG_RUNTIME_DIR:-}"; do
 		[ -n "$cand" ] || continue
 		cand="${cand%/}"
 		[ -n "$cand" ] || continue
@@ -246,10 +277,33 @@ exec_root_init() {
 			continue
 		}
 		# Probe the directory actually handed out, not its parent.
-		exec_probe "$root" && break
-		rm -rf -- "$root"
+		if ! exec_probe "$root"; then
+			rm -rf -- "$root"
+			root=""
+			continue
+		fi
+		# It executes. Is there room to build in it? A cramped root is better
+		# than no root, but only after every roomier candidate has been tried,
+		# so hold the first one aside and keep looking.
+		exec_space_ok "$root" && break
+		if [ -n "$cramped" ]; then
+			rm -rf -- "$root"
+		else
+			cramped="$root"
+		fi
 		root=""
 	done
+	if [ -z "$root" ] && [ -n "$cramped" ]; then
+		root="$cramped"
+		cramped=""
+		warn "scratch $root has under $((EXEC_MIN_KIB / 1024)) MiB free."
+		warn "  it is the only exec-capable directory on this host; the cargo build may"
+		warn "  run out of room, and if it is a tmpfs the build competes with itself for RAM."
+	fi
+	if [ -n "$cramped" ]; then
+		rm -rf -- "$cramped"
+		cramped=""
+	fi
 	if [ -z "$root" ]; then
 		warn "no exec-capable scratch directory is available on this host."
 		warn "  tried: ${tried[*]:-(nothing)}"
