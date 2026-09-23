@@ -445,7 +445,11 @@ ensure_build_packages() {
 # ---------------------------------------------------------------------------
 # rust + tree-sitter CLI
 # ---------------------------------------------------------------------------
-tree_sitter_version_of() { "$1" --version 2>/dev/null | awk '{print $2}'; }
+# tree_sitter_version_of BIN — BIN's version, or nothing. Never a failure: under
+# `set -euo pipefail` a CLI on PATH that cannot run (upstream's release build
+# needs glibc 2.39 and dies at load on bookworm) otherwise ended the whole run at
+# the plain assignment capturing this, without a word.
+tree_sitter_version_of() { "$1" --version 2>/dev/null | awk '{print $2}' || :; }
 
 install_rustup() {
 	local work
@@ -648,7 +652,9 @@ nvim_expected_sha() {
 	esac
 }
 
-nvim_version_of() { "$1" --version 2>/dev/null | awk 'NR==1 {sub(/^v/,"",$2); print $2; exit}'; }
+# nvim_version_of BIN — as tree_sitter_version_of: the version or nothing, never
+# a failure (a truncated or wrong-arch nvim exits 126 or 139 here).
+nvim_version_of() { "$1" --version 2>/dev/null | awk 'NR==1 {sub(/^v/,"",$2); print $2; exit}' || :; }
 
 # report_nvim_on_path — which nvim actually wins, and what an old install left.
 report_nvim_on_path() {
