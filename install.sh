@@ -8,13 +8,14 @@
 #
 # In order it:
 #   1. installs the prerequisites this config needs (git, curl, ripgrep, fd,
-#      unzip, a C toolchain)
+#      unzip, a C compiler — every treesitter parser is compiled on this host)
 #   2. makes sure the pinned tree-sitter CLI is present — building it with cargo,
-#      and bootstrapping rustup first when there is no cargo
+#      and bootstrapping rustup first when there is no cargo — and puts a
+#      root-owned copy of it in /usr/local/bin
 #   3. installs the PINNED neovim release into /usr/local
 #   4. backs up ~/.config/nvim, then installs this repo there
-#   5. runs :Lazy sync and the treesitter parser install headlessly, so the first
-#      launch is clean
+#   5. installs the plugins (at the lazy-lock.json pins when there is one) and
+#      the treesitter parsers headlessly, so the first launch is clean
 #
 # Safe to re-run. Every step is idempotent, anything it replaces is backed up to
 # a timestamped path next to the original first, and nothing owned by
@@ -88,7 +89,7 @@ Usage: install.sh [options]
                          pinned tag, so another version installs unverified
                          unless you also set NVIM_SHA256.
   --skip-neovim          Do not touch neovim; only install the config.
-  --skip-bootstrap       Do not run the headless :Lazy sync / parser install.
+  --skip-bootstrap       Do not run the headless plugin / parser install.
   --force                Replace ~/.config/nvim even when it is a symlink
                          (e.g. managed by linux-devops-tools). Backed up first.
   -h, --help             This text.
@@ -982,12 +983,25 @@ install_config() {
 # ---------------------------------------------------------------------------
 # headless bootstrap
 # ---------------------------------------------------------------------------
+# The headless parser install, as one `-c` command. Why each part is there:
+#   * pcall + cquit: `:wait()` RAISES on a timeout, and an error inside a -c
+#     command is printed and then ignored — nvim carried on to +qa and exited 0.
+#     install() in turn RETURNS false for a language that did not build rather
+#     than raising, so its result is checked too. Either way the exit status is
+#     now 1, and the caller can say so.
+#   * max_jobs: nvim-treesitter's default is 100 compilers at once. Under a 1 GiB
+#     memory limit that was an OOM-killed cc1 part-way through, reported as a
+#     clean run. At most four, fewer on a smaller machine.
+#   * 30 minutes: the whole set builds in a few minutes with clang; the ceiling
+#     is for a slow machine, not the expected case.
+TS_BOOTSTRAP_LUA='local jobs = math.min(4, vim.uv.available_parallelism()) local ok, done = pcall(function() return require("nvim-treesitter").install(require("parsers"), { max_jobs = jobs }):wait(1800000) end) if not ok then io.stderr:write(tostring(done), "\n") end vim.cmd(ok and done and "qall!" or "cquit 1")'
+
 bootstrap() {
 	local nvim_bin
 	nvim_bin="$(command -v nvim 2>/dev/null || true)"
 	[ -n "$nvim_bin" ] || {
 		warn "no nvim on PATH; skipping the headless bootstrap"
-		note "run ':Lazy sync' and ':lua require(\"nvim-treesitter\").install(require(\"parsers\"))' yourself once nvim is on PATH."
+		note "run ':Lazy restore' and ':lua require(\"nvim-treesitter\").install(require(\"parsers\"))' yourself once nvim is on PATH."
 		return 0
 	}
 
@@ -1002,17 +1016,34 @@ bootstrap() {
 	local -a envv=()
 	if exec_dir_alloc 2>/dev/null; then envv=(env "TMPDIR=$EXEC_DIR"); fi
 
-	log "bootstrapping plugins (lazy.nvim sync)"
+	# Plugins at the pins in lazy-lock.json whenever there is one. This used to
+	# run `:Lazy sync`, which is install + clean + UPDATE: every re-run upgraded
+	# every plugin past the lock that install_config had just carried across.
+	# `restore` checks out the locked commits instead; a plugin the lock does not
+	# know yet is installed at startup by lazy.nvim itself. Upgrading stays a
+	# deliberate `:Lazy sync` inside nvim.
+	local lazy_cmd="install"
+	[ -f "$CONFIG_DIR/lazy-lock.json" ] && lazy_cmd="restore"
+	log "bootstrapping plugins (:Lazy $lazy_cmd)"
 	# stdin closed: a headless nvim that hits a prompt with an attached terminal
 	# blocks forever, which is how `curl | bash` installs hang.
-	"${envv[@]}" "$nvim_bin" --headless "+Lazy! sync" +qa </dev/null >/dev/null 2>&1 ||
-		note "':Lazy sync' did not finish cleanly; run it inside nvim."
+	"${envv[@]}" "$nvim_bin" --headless "+Lazy! $lazy_cmd" "+Lazy! clean" +qa </dev/null >/dev/null 2>&1 ||
+		note "':Lazy $lazy_cmd' did not finish cleanly; run it inside nvim."
 
+	# The config's own startup install stays out of the way: it does not run in a
+	# headless nvim (lua/essential/treesitter.lua), so this is the only install in
+	# flight. It used to start first and hold every language, and this one then
+	# waited on each for nvim-treesitter's 60 s per-language timeout and gave up.
+	local tslog="$CACHE_DIR/parsers.log"
+	mkdir -p -- "$CACHE_DIR"
 	log "bootstrapping treesitter parsers (this can take a few minutes)"
-	"${envv[@]}" "$nvim_bin" --headless \
-		-c 'lua require("nvim-treesitter").install(require("parsers")):wait(600000)' +qa \
-		</dev/null 2>&1 | tail -n 5 ||
-		note "the treesitter parser install did not finish cleanly; run ':lua require(\"nvim-treesitter\").install(require(\"parsers\"))' inside nvim."
+	if "${envv[@]}" "$nvim_bin" --headless -c "lua $TS_BOOTSTRAP_LUA" </dev/null >"$tslog" 2>&1; then
+		info "treesitter parsers: installed"
+	else
+		warn "the treesitter parser install failed; the end of $tslog:"
+		tail -n 15 -- "$tslog" | sed 's/^/      /' >&2
+		note "treesitter parsers are incomplete (log: $tslog). Fix what it reports, then re-run this script or run :TSInstall inside nvim."
+	fi
 }
 
 # ---------------------------------------------------------------------------
