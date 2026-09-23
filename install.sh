@@ -8,13 +8,14 @@
 #
 # In order it:
 #   1. installs the prerequisites this config needs (git, curl, ripgrep, fd,
-#      unzip, a C toolchain)
+#      unzip, a C compiler — every treesitter parser is compiled on this host)
 #   2. makes sure the pinned tree-sitter CLI is present — building it with cargo,
-#      and bootstrapping rustup first when there is no cargo
+#      and bootstrapping rustup first when there is no cargo — and puts a
+#      root-owned copy of it in /usr/local/bin
 #   3. installs the PINNED neovim release into /usr/local
 #   4. backs up ~/.config/nvim, then installs this repo there
-#   5. runs :Lazy sync and the treesitter parser install headlessly, so the first
-#      launch is clean
+#   5. installs the plugins (at the lazy-lock.json pins when there is one) and
+#      the treesitter parsers headlessly, so the first launch is clean
 #
 # Safe to re-run. Every step is idempotent, anything it replaces is backed up to
 # a timestamped path next to the original first, and nothing owned by
@@ -88,7 +89,7 @@ Usage: install.sh [options]
                          pinned tag, so another version installs unverified
                          unless you also set NVIM_SHA256.
   --skip-neovim          Do not touch neovim; only install the config.
-  --skip-bootstrap       Do not run the headless :Lazy sync / parser install.
+  --skip-bootstrap       Do not run the headless plugin / parser install.
   --force                Replace ~/.config/nvim even when it is a symlink
                          (e.g. managed by linux-devops-tools). Backed up first.
   -h, --help             This text.
@@ -332,13 +333,11 @@ exec_dir_alloc() {
 }
 
 CLONE_DIR=""
-STAGE_DIR=""
 cleanup() {
 	# `return 0` is load-bearing: under `set -e` a trap whose last command
 	# returns non-zero becomes the SCRIPT's exit status, so a clean install would
 	# still report failure and break any `&&` chain or CI gate.
 	[ -n "$CLONE_DIR" ] && rm -rf -- "$CLONE_DIR"
-	[ -n "$STAGE_DIR" ] && rm -rf -- "$STAGE_DIR"
 	if [ -n "$EXEC_ROOT" ]; then
 		case "$EXEC_ROOT" in
 		*/nvim-config-exec.*) rm -rf -- "$EXEC_ROOT" ;;
@@ -387,10 +386,12 @@ pkg_install() { # pkg_install <debian-names...>  (best effort elsewhere)
 	esac
 }
 
-# ensure_runtime_packages — what the CONFIG needs at runtime, nothing more.
-# The compiler/rust build dependencies are NOT here: they are pulled in only when
-# tree-sitter actually has to be built (see ensure_tree_sitter), so a re-run on a
-# box that already has the CLI touches the package manager not at all.
+# ensure_runtime_packages — what the CONFIG needs at runtime, nothing more. That
+# includes a C compiler, because parsers are compiled at runtime. The rest of the
+# toolchain (make, pkg-config, openssl and libclang headers) is NOT here: it is
+# pulled in only when tree-sitter actually has to be built (see
+# ensure_tree_sitter), so a re-run on a box that already has everything touches
+# the package manager not at all.
 ensure_runtime_packages() {
 	local missing=()
 	have git || missing+=(git)
@@ -405,14 +406,39 @@ ensure_runtime_packages() {
 		*) missing+=(fd) ;;
 		esac
 	fi
-	[ ${#missing[@]} -gt 0 ] || {
+	# A C compiler is a RUNTIME need of this config, not only a build one:
+	# nvim-treesitter's main branch compiles every parser on this host with
+	# `tree-sitter build`. Without one every parser failed to build, and the run
+	# still ended in "done".
+	if ! have cc; then
+		case "$PKG" in
+		apt-get) missing+=(build-essential) ;;
+		dnf | yum | zypper) missing+=(gcc) ;;
+		pacman) missing+=(base-devel) ;;
+		apk) missing+=(build-base) ;;
+		esac
+	fi
+	if [ ${#missing[@]} -gt 0 ]; then
+		log "installing prerequisites: ${missing[*]}"
+		pkg_install "${missing[@]}" || warn "could not install: ${missing[*]}"
+	else
 		info "prerequisites: all present"
-		return 0
-	}
-	log "installing prerequisites: ${missing[*]}"
-	pkg_install "${missing[@]}" || warn "could not install: ${missing[*]}"
+	fi
 	have git || die "git is required and could not be installed"
 	have curl || die "curl is required and could not be installed"
+	have cc || note "no C compiler: treesitter parsers cannot be built. Install gcc or clang, then run :TSInstall inside nvim."
+
+	# clang as well where cc is gcc 12 (Debian 12's). Under the -Wall that
+	# `tree-sitter build` passes, gcc 12 spent over 25 minutes and ~2 GB on the
+	# gitcommit parser alone; clang builds the same file in 7 s, and the config
+	# builds parsers with clang whenever it is installed. Asked only after the
+	# install above, which is what put gcc on a fresh box.
+	local ccv
+	ccv="$(cc -dumpversion 2>/dev/null || :)"
+	if [ "${ccv%%.*}" = 12 ] && ! have clang; then
+		log "installing clang (gcc 12 takes 25+ minutes over some treesitter parsers)"
+		pkg_install clang || warn "could not install clang; parsers will be built with gcc 12, slowly"
+	fi
 	return 0
 }
 
@@ -447,7 +473,11 @@ ensure_build_packages() {
 # ---------------------------------------------------------------------------
 # rust + tree-sitter CLI
 # ---------------------------------------------------------------------------
-tree_sitter_version_of() { "$1" --version 2>/dev/null | awk '{print $2}'; }
+# tree_sitter_version_of BIN — BIN's version, or nothing. Never a failure: under
+# `set -euo pipefail` a CLI on PATH that cannot run (upstream's release build
+# needs glibc 2.39 and dies at load on bookworm) otherwise ended the whole run at
+# the plain assignment capturing this, without a word.
+tree_sitter_version_of() { "$1" --version 2>/dev/null | awk '{print $2}' || :; }
 
 install_rustup() {
 	local work
@@ -496,6 +526,11 @@ install_rustup() {
 }
 
 ensure_tree_sitter() {
+	install_tree_sitter_cli
+	publish_tree_sitter
+}
+
+install_tree_sitter_cli() {
 	# Put a cargo-installed CLI on PATH before deciding anything: on a box where
 	# rustup ran with --no-modify-path, ~/.cargo/bin is not on a non-interactive
 	# PATH and the check below would rebuild a CLI that is already there.
@@ -562,19 +597,59 @@ ensure_tree_sitter() {
 		return 0
 	}
 	hash -r 2>/dev/null || true
-
-	# A system-wide handle so `:TSInstall` works in an interactive nvim whose PATH
-	# does not carry ~/.cargo/bin. It points at a binary inside $HOME, which is
-	# worth knowing: anyone who can write $CARGO_HOME/bin decides what
-	# /usr/local/bin/tree-sitter runs. Only created when nothing else answers.
-	if [ ! -e "$NVIM_PREFIX/bin/tree-sitter" ] && [ -x "$CARGO_HOME_DIR/bin/tree-sitter" ]; then
-		if as_root ln -s "$CARGO_HOME_DIR/bin/tree-sitter" "$NVIM_PREFIX/bin/tree-sitter" 2>/dev/null; then
-			note "$NVIM_PREFIX/bin/tree-sitter is a symlink into $CARGO_HOME_DIR/bin (a user-owned path)."
-		else
-			info "could not create $NVIM_PREFIX/bin/tree-sitter (no root?); PATH will have to carry $CARGO_HOME_DIR/bin"
-		fi
-	fi
 	log "tree-sitter: $(tree_sitter_version_of tree-sitter) at $(command -v tree-sitter)"
+}
+
+# publish_tree_sitter — a ROOT-OWNED copy of the pinned CLI at
+# $NVIM_PREFIX/bin/tree-sitter, so `:TSInstall` works in an nvim whose PATH does
+# not carry ~/.cargo/bin, root's included.
+#
+# A copy, never a link. This script used to create
+#     /usr/local/bin/tree-sitter -> ~/.cargo/bin/tree-sitter
+# and root's nvim runs that CLI without being asked: the config builds missing
+# parsers at startup, and linux-devops-tools gives root the same config. The
+# user who owned ~/.cargo/bin therefore decided what ran as root — swapping the
+# link's target for a wrapper logged `tree-sitter build ran as uid=0` 35 times in
+# one root session. A link, or a file root does not own, is replaced for that
+# reason, on every run, including the ones that build nothing.
+publish_tree_sitter() {
+	local dest="$NVIM_PREFIX/bin/tree-sitter" src tmp why=""
+	if [ -L "$dest" ]; then
+		why="it is a symlink -> $(readlink -- "$dest")"
+	elif [ -e "$dest" ] && [ "$(stat -c %u -- "$dest" 2>/dev/null || :)" != 0 ]; then
+		why="root does not own it"
+	elif [ "$(tree_sitter_version_of "$dest")" = "$TREE_SITTER_VERSION" ]; then
+		return 0
+	fi
+
+	src="$(command -v tree-sitter 2>/dev/null || :)"
+	if [ -z "$src" ] || [ "$(tree_sitter_version_of "$src")" != "$TREE_SITTER_VERSION" ]; then
+		# Nothing pinned to put there; an unsafe handle is reported, not deleted,
+		# since removing it takes the CLI away from whoever relies on it.
+		if [ -n "$why" ]; then
+			warn "$dest is unsafe: $why, and root's nvim runs it."
+			note "$dest: $why. Root's nvim runs it; remove it (sudo rm $dest) or re-run this script once the tree-sitter CLI builds."
+		fi
+		return 0
+	fi
+
+	[ -z "$why" ] || warn "$dest: $why — replacing it with a root-owned copy"
+	# Into a temporary name first, then renamed over: rename(2) replaces a symlink
+	# rather than writing through it, and never leaves a half-written binary.
+	tmp="$dest.new.$$"
+	if as_root install -m 0755 -o root -g root -- "$src" "$tmp" 2>/dev/null &&
+		as_root mv -f -- "$tmp" "$dest"; then
+		info "root-owned tree-sitter $TREE_SITTER_VERSION at $dest"
+		return 0
+	fi
+	as_root rm -f -- "$tmp" 2>/dev/null || :
+	if [ -n "$why" ]; then
+		warn "could not replace $dest (no root?) — root's nvim still runs it."
+		note "$dest: $why. Root's nvim runs it; remove it (sudo rm $dest) or re-run this script with sudo available."
+	else
+		info "could not install $dest (no root?); PATH will have to carry $(dirname -- "$src")"
+	fi
+	return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -605,7 +680,9 @@ nvim_expected_sha() {
 	esac
 }
 
-nvim_version_of() { "$1" --version 2>/dev/null | awk 'NR==1 {sub(/^v/,"",$2); print $2; exit}'; }
+# nvim_version_of BIN — as tree_sitter_version_of: the version or nothing, never
+# a failure (a truncated or wrong-arch nvim exits 126 or 139 here).
+nvim_version_of() { "$1" --version 2>/dev/null | awk 'NR==1 {sub(/^v/,"",$2); print $2; exit}' || :; }
 
 # report_nvim_on_path — which nvim actually wins, and what an old install left.
 report_nvim_on_path() {
@@ -687,20 +764,78 @@ replace_distro_nvim() {
 	hash -r 2>/dev/null || true
 }
 
+# nvim_foreign — the first path of the neovim install in $NVIM_PREFIX that root
+# does not own, or nothing. An earlier version of this script unpacked neovim
+# into a user-owned staging directory and `sudo cp -a`'d that onto the prefix,
+# and `cp -a` copies the staging directory's OWN owner and mode onto the target:
+# the user who ran it came to own $NVIM_PREFIX itself, every directory neovim
+# writes into, and the runtime that root's nvim loads — enough to swap
+# /usr/local/sbin, first in sudo's secure_path, for their own. Run as root, the
+# same copy handed all of it to uid 1001, the archive's `runner` owner.
+nvim_foreign() {
+	{
+		find "$NVIM_PREFIX" "$NVIM_PREFIX/bin" "$NVIM_PREFIX/lib" "$NVIM_PREFIX/share" \
+			-maxdepth 0 ! -uid 0 -print -quit 2>/dev/null || :
+		find "$NVIM_PREFIX/bin/nvim" "$NVIM_PREFIX/lib/nvim" "$NVIM_PREFIX/share/nvim/runtime" \
+			! -uid 0 -print -quit 2>/dev/null || :
+	} | head -n 1
+}
+
+# reclaim_prefix_dirs LISTING — root takes back each directory of $NVIM_PREFIX
+# the archive writes into, when someone else owns it. --no-overwrite-dir leaves
+# an existing directory's owner alone, so where the old `cp -a` had handed
+# $NVIM_PREFIX, bin, share, … to a user, that user would otherwise keep them.
+# Directories root already owns (Debian's root:staff 2775 ones included) are
+# not touched.
+reclaim_prefix_dirs() {
+	local -a dirs=() fix=()
+	mapfile -t dirs < <(
+		printf '%s\n' "$NVIM_PREFIX"
+		sed -n 's|^nvim-linux-'"$NVIM_ARCH"'/\(.*[^/]\)/$|'"$NVIM_PREFIX"'/\1|p' <<<"$1"
+	)
+	mapfile -t fix < <(find "${dirs[@]}" -maxdepth 0 -type d ! -uid 0 -print 2>/dev/null || :)
+	[ ${#fix[@]} -gt 0 ] || return 0
+	log "giving ${#fix[@]} director(ies) under $NVIM_PREFIX back to root"
+	if as_root chown root:root -- "${fix[@]}" && as_root chmod 0755 -- "${fix[@]}"; then
+		note "root took back ${#fix[@]} director(ies) under $NVIM_PREFIX that an earlier version of this script had given away. Anything else there that root does not own is not this script's to judge: sudo find $NVIM_PREFIX -xdev ! -uid 0 -ls"
+	else
+		warn "could not give these back to root: ${fix[*]}"
+	fi
+}
+
 install_neovim() {
 	detect_arch
-	local asset url want cur sha dl
+	local asset url want sha dl listing top cur="" foreign=""
 	asset="nvim-linux-${NVIM_ARCH}.tar.gz"
 	url="https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/${asset}"
 	want="${NVIM_VERSION#v}"
 
 	if [ -x "$NVIM_PREFIX/bin/nvim" ]; then
 		cur="$(nvim_version_of "$NVIM_PREFIX/bin/nvim")"
-		if [ "$cur" = "$want" ]; then
+		foreign="$(nvim_foreign)"
+		if [ "$cur" = "$want" ] && [ -z "$foreign" ]; then
 			log "neovim: already $cur at $NVIM_PREFIX/bin/nvim"
 			return 0
 		fi
-		info "neovim ${cur:-unknown} -> $want"
+		if [ -n "$foreign" ]; then
+			warn "root does not own $foreign — reinstalling neovim so that it does"
+		else
+			info "neovim ${cur:-unknown} -> $want"
+		fi
+	fi
+
+	# Everything below writes to $NVIM_PREFIX as root, so ask for root first. A
+	# user without usable sudo still gets the config: this step used to die
+	# half-way and take the config install down with it.
+	if ! as_root true 2>/dev/null; then
+		if [ "$cur" = "$want" ]; then
+			warn "no usable sudo: cannot give $NVIM_PREFIX back to root"
+		else
+			warn "no usable sudo: neovim $want is NOT installed into $NVIM_PREFIX"
+			note "neovim was not installed: it goes into $NVIM_PREFIX, which needs root, and sudo is missing, refused, or wanted a password with no terminal to ask on. Install neovim 0.12+ yourself, or re-run where sudo works (--skip-neovim skips this step)."
+		fi
+		[ -z "$foreign" ] || note "root does not own $foreign, and root runs what is there. As root: chown -R root:root $NVIM_PREFIX/share/nvim $NVIM_PREFIX/lib/nvim $NVIM_PREFIX/bin/nvim && chown root:root $NVIM_PREFIX $NVIM_PREFIX/bin $NVIM_PREFIX/lib $NVIM_PREFIX/share"
+		return 0
 	fi
 
 	mkdir -p -- "$CACHE_DIR/dl"
@@ -728,20 +863,17 @@ install_neovim() {
 		warn "installing neovim $NVIM_VERSION WITHOUT a checksum: neovim publishes no checksum asset, and this repo only records one for $NVIM_PINNED_TAG. Source: $url"
 	fi
 
-	# Extract to a staging dir and check the shape BEFORE anything under
-	# /usr/local is touched, so a truncated or wrong-shaped archive cannot leave a
-	# half-replaced install behind. Extraction needs no exec permission, so this
-	# stays on a plain mktemp -d even where /tmp is noexec.
-	STAGE_DIR="$(mktemp -d)"
-	tar -xzf "$dl" -C "$STAGE_DIR" || die "could not unpack $dl"
-	local src="$STAGE_DIR/nvim-linux-${NVIM_ARCH}"
-	# `-f`, NOT `-x`. `test -x` calls access(X_OK), which is itself noexec-aware:
-	# on a host with /tmp mounted noexec it answers "no" for a perfectly good
-	# binary that simply happens to be sitting on that filesystem, and this check
-	# would reject every download. The mode bits survive the copy either way —
-	# noexec is a property of the mount, not of the inode — so the binary is
-	# executable once it reaches /usr/local.
-	[ -f "$src/bin/nvim" ] || die "$asset does not contain nvim-linux-${NVIM_ARCH}/bin/nvim"
+	# The archive's shape, checked BEFORE anything under $NVIM_PREFIX is touched,
+	# so a truncated or wrong-shaped archive cannot leave a half-replaced install:
+	# the binary is where it belongs, and nothing lies outside the one top-level
+	# directory that --strip-components removes. Read from the listing, not a
+	# staged copy — there is no staged copy any more.
+	top="nvim-linux-${NVIM_ARCH}/"
+	listing="$(tar -tzf "$dl")" || die "could not read $dl"
+	grep -qx "${top}bin/nvim" <<<"$listing" || die "$asset does not contain ${top}bin/nvim"
+	if grep -qv "^${top}" <<<"$listing"; then
+		die "$asset has entries outside ${top}; refusing to unpack it into $NVIM_PREFIX"
+	fi
 
 	# Replace the two subtrees that are exclusively neovim's, so runtime files
 	# dropped by upstream between versions do not linger. Both are under
@@ -749,10 +881,19 @@ install_neovim() {
 	# sysadmin's own runtime files would live — is deliberately left alone.
 	log "installing neovim $want into $NVIM_PREFIX"
 	as_root rm -rf -- "$NVIM_PREFIX/share/nvim/runtime" "$NVIM_PREFIX/lib/nvim/parser" ||
-		die "could not clear the previous neovim runtime (no root?)"
-	as_root cp -a -- "$src/." "$NVIM_PREFIX/" || die "could not install into $NVIM_PREFIX"
-	rm -rf -- "$STAGE_DIR"
-	STAGE_DIR=""
+		die "could not clear the previous neovim runtime"
+	# Unpacked BY ROOT, straight into the prefix, never staged somewhere the
+	# invoking user owns and copied from there (nvim_foreign says what that did):
+	#   --no-same-owner      root's tar otherwise restores the archive's owner,
+	#                        uid 1001, on every file
+	#   --no-overwrite-dir   an existing directory keeps its own owner and mode;
+	#                        $NVIM_PREFIX, bin, share, … are not neovim's
+	# Root's tar also takes the modes from the archive (0755/0644) rather than
+	# from the umask, so a hardened umask 027 no longer locks every other user
+	# out of /usr/local/bin.
+	as_root tar -xzf "$dl" -C "$NVIM_PREFIX" --strip-components=1 --no-same-owner --no-overwrite-dir ||
+		die "could not unpack $dl into $NVIM_PREFIX"
+	reclaim_prefix_dirs "$listing"
 	hash -r 2>/dev/null || true
 	log "neovim: $(nvim_version_of "$NVIM_PREFIX/bin/nvim") at $NVIM_PREFIX/bin/nvim"
 }
@@ -842,12 +983,25 @@ install_config() {
 # ---------------------------------------------------------------------------
 # headless bootstrap
 # ---------------------------------------------------------------------------
+# The headless parser install, as one `-c` command. Why each part is there:
+#   * pcall + cquit: `:wait()` RAISES on a timeout, and an error inside a -c
+#     command is printed and then ignored — nvim carried on to +qa and exited 0.
+#     install() in turn RETURNS false for a language that did not build rather
+#     than raising, so its result is checked too. Either way the exit status is
+#     now 1, and the caller can say so.
+#   * max_jobs: nvim-treesitter's default is 100 compilers at once. Under a 1 GiB
+#     memory limit that was an OOM-killed cc1 part-way through, reported as a
+#     clean run. At most four, fewer on a smaller machine.
+#   * 30 minutes: the whole set builds in a few minutes with clang; the ceiling
+#     is for a slow machine, not the expected case.
+TS_BOOTSTRAP_LUA='local jobs = math.min(4, vim.uv.available_parallelism()) local ok, done = pcall(function() return require("nvim-treesitter").install(require("parsers"), { max_jobs = jobs }):wait(1800000) end) if not ok then io.stderr:write(tostring(done), "\n") end vim.cmd(ok and done and "qall!" or "cquit 1")'
+
 bootstrap() {
 	local nvim_bin
 	nvim_bin="$(command -v nvim 2>/dev/null || true)"
 	[ -n "$nvim_bin" ] || {
 		warn "no nvim on PATH; skipping the headless bootstrap"
-		note "run ':Lazy sync' and ':lua require(\"nvim-treesitter\").install(require(\"parsers\"))' yourself once nvim is on PATH."
+		note "run ':Lazy restore' and ':lua require(\"nvim-treesitter\").install(require(\"parsers\"))' yourself once nvim is on PATH."
 		return 0
 	}
 
@@ -862,17 +1016,34 @@ bootstrap() {
 	local -a envv=()
 	if exec_dir_alloc 2>/dev/null; then envv=(env "TMPDIR=$EXEC_DIR"); fi
 
-	log "bootstrapping plugins (lazy.nvim sync)"
+	# Plugins at the pins in lazy-lock.json whenever there is one. This used to
+	# run `:Lazy sync`, which is install + clean + UPDATE: every re-run upgraded
+	# every plugin past the lock that install_config had just carried across.
+	# `restore` checks out the locked commits instead; a plugin the lock does not
+	# know yet is installed at startup by lazy.nvim itself. Upgrading stays a
+	# deliberate `:Lazy sync` inside nvim.
+	local lazy_cmd="install"
+	[ -f "$CONFIG_DIR/lazy-lock.json" ] && lazy_cmd="restore"
+	log "bootstrapping plugins (:Lazy $lazy_cmd)"
 	# stdin closed: a headless nvim that hits a prompt with an attached terminal
 	# blocks forever, which is how `curl | bash` installs hang.
-	"${envv[@]}" "$nvim_bin" --headless "+Lazy! sync" +qa </dev/null >/dev/null 2>&1 ||
-		note "':Lazy sync' did not finish cleanly; run it inside nvim."
+	"${envv[@]}" "$nvim_bin" --headless "+Lazy! $lazy_cmd" "+Lazy! clean" +qa </dev/null >/dev/null 2>&1 ||
+		note "':Lazy $lazy_cmd' did not finish cleanly; run it inside nvim."
 
+	# The config's own startup install stays out of the way: it does not run in a
+	# headless nvim (lua/essential/treesitter.lua), so this is the only install in
+	# flight. It used to start first and hold every language, and this one then
+	# waited on each for nvim-treesitter's 60 s per-language timeout and gave up.
+	local tslog="$CACHE_DIR/parsers.log"
+	mkdir -p -- "$CACHE_DIR"
 	log "bootstrapping treesitter parsers (this can take a few minutes)"
-	"${envv[@]}" "$nvim_bin" --headless \
-		-c 'lua require("nvim-treesitter").install(require("parsers")):wait(600000)' +qa \
-		</dev/null 2>&1 | tail -n 5 ||
-		note "the treesitter parser install did not finish cleanly; run ':lua require(\"nvim-treesitter\").install(require(\"parsers\"))' inside nvim."
+	if "${envv[@]}" "$nvim_bin" --headless -c "lua $TS_BOOTSTRAP_LUA" </dev/null >"$tslog" 2>&1; then
+		info "treesitter parsers: installed"
+	else
+		warn "the treesitter parser install failed; the end of $tslog:"
+		tail -n 15 -- "$tslog" | sed 's/^/      /' >&2
+		note "treesitter parsers are incomplete (log: $tslog). Fix what it reports, then re-run this script or run :TSInstall inside nvim."
+	fi
 }
 
 # ---------------------------------------------------------------------------

@@ -36,10 +36,10 @@ return {
 
       -- You'll need to check that you have the required things installed
       -- online, please don't ask me how to install them :)
-      ensure_installed = {
-        -- Update this to ensure that you have the debuggers for the langs you want
-        'delve',
-      },
+      -- Update this to ensure that you have the debuggers for the langs you want.
+      -- delve is built with go, so it is asked for only where go is on PATH;
+      -- elsewhere mason failed to install it at every launch.
+      ensure_installed = vim.fn.executable 'go' == 1 and { 'delve' } or {},
     }
 
     -- Basic debugging keymaps, feel free to change to your liking!

@@ -47,15 +47,17 @@ return { -- LSP Configuration & Plugins
         --
         -- In this case, we create a function that lets us more easily define mappings specific
         -- for LSP related items. It sets the mode, buffer and description for us each time.
-        local map = function(keys, func, desc)
-          vim.keymap.set('n', keys, func, { buffer = event.buf, desc = 'LSP: ' .. desc })
+        local map = function(keys, func, desc, opts)
+          vim.keymap.set('n', keys, func, vim.tbl_extend('force', { buffer = event.buf, desc = 'LSP: ' .. desc }, opts or {}))
         end
         -- Jump to the definition of the word under your cursor.
         --  This is where a variable was first declared, or where a function is defined, etc.
         --  To jump back, press <C-T>.
         map('gd', require('telescope.builtin').lsp_definitions, '[G]oto [D]efinition')
         -- Find references for the word under your cursor.
-        map('gr', require('telescope.builtin').lsp_references, '[G]oto [R]eferences')
+        -- nowait: nvim 0.11+ maps grn/grr/gra/gri/grt/grx globally, so without it
+        -- `gr` sat out 'timeoutlen' every time, waiting to see if one was meant.
+        map('gr', require('telescope.builtin').lsp_references, '[G]oto [R]eferences', { nowait = true })
         -- Jump to the implementation of the word under your cursor.
         --  Useful when your language has ways of declaring types without an actual implementation.
         map('gI', require('telescope.builtin').lsp_implementations, '[G]oto [I]mplementation')
@@ -104,37 +106,52 @@ return { -- LSP Configuration & Plugins
     -- You can configure servers using vim.lsp.config() or lspconfig
     -- Initialize Mason first
     require('mason').setup()
-    -- Configure mason-lspconfig with ensure_installed servers
-    -- Note: automatic_enable requires Neovim 0.11+
-    require('mason-lspconfig').setup {
-      ensure_installed = {
-        -- Language servers only (these are actual LSP servers)
-        'clangd',
-        'gopls',
+
+    -- Some mason packages are BUILT here: npm packages need npm, gopls and delve
+    -- need go. On a box without one (root's nvim, where node comes from a per-user
+    -- nvm; any box without go) asking for them failed at every launch with a
+    -- "Press ENTER" prompt. They are asked for only when the toolchain is on PATH,
+    -- and appear on the next launch after it is.
+    local function needs(tool, list)
+      return vim.fn.executable(tool) == 1 and list or {}
+    end
+
+    local servers = {
+      -- Language servers only (these are actual LSP servers)
+      'clangd',
+      'lua_ls',
+      'rust_analyzer', -- Rust
+      'marksman', -- Markdown
+      'terraformls', -- Terraform
+      -- Add other servers you want automatically installed
+    }
+    vim.list_extend(servers, needs('go', { 'gopls' }))
+    vim.list_extend(
+      servers,
+      needs('npm', {
         'ansiblels',
         'bashls',
         'dockerls',
         'docker_compose_language_service',
         'ts_ls', -- Changed from tsserver to ts_ls
-        'lua_ls',
         'pyright', -- Python
-        'rust_analyzer', -- Rust
-        'marksman', -- Markdown
-        'terraformls', -- Terraform
-        -- Add other servers you want automatically installed
-      },
+      })
+    )
+    -- Configure mason-lspconfig with ensure_installed servers
+    -- Note: automatic_enable requires Neovim 0.11+
+    require('mason-lspconfig').setup {
+      ensure_installed = servers,
       automatic_enable = true, -- Disable if using Neovim < 0.11
     }
     -- Install additional tools (non-LSP servers) via mason-tool-installer
     require('mason-tool-installer').setup {
-      ensure_installed = {
+      ensure_installed = vim.list_extend({
         'stylua', -- Lua formatter
-        'prettier', -- Web formatter
         'shellcheck', -- Shell linter
         'tfsec', -- Terraform security
         'tflint', -- Terraform linter
         -- Add other linters/formatters here
-      },
+      }, needs('npm', { 'prettier' })), -- Web formatter
     }
     -- Configure LSP capabilities for nvim-cmp completion
     local capabilities = require('cmp_nvim_lsp').default_capabilities()
@@ -144,6 +161,15 @@ return { -- LSP Configuration & Plugins
     -- call vim.lsp.enable() for all installed servers
     vim.lsp.config('*', {
       capabilities = capabilities,
+    })
+
+    -- marksman is a .NET binary, and .NET aborts at startup where libicu is not
+    -- installed ("Couldn't find a valid ICU package"), which a minimal server or
+    -- container often lacks: every markdown buffer then said "Client marksman quit
+    -- with exit code 0 and signal 6". Reading markdown needs no locale data, so
+    -- it runs in .NET's invariant mode everywhere.
+    vim.lsp.config('marksman', {
+      cmd_env = { DOTNET_SYSTEM_GLOBALIZATION_INVARIANT = '1' },
     })
 
     -- Configure lua_ls with custom settings for Neovim development

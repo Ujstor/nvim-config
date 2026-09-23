@@ -1,0 +1,15 @@
+name: lint
+
+# The same gates as a laptop and the internal GitLab mirror: `make check` is
+# lint-coverage (every shell file is on the list), `bash -n`, shellcheck and
+# shfmt, both linters from pinned containers.
+
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make check
+        run: make check USE_DOCKER=1

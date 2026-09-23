@@ -6,8 +6,9 @@ return { -- Useful plugin to show you pending keybinds.
       notify = false,
     }
 
-    -- Document existing key chains
-    require('which-key').register {
+    -- Document existing key chains. `add`, not `register`: register() reads its
+    -- argument as the OLD spec, so every group label here landed on an empty key.
+    require('which-key').add {
       { '<leader>c', group = '[C]ode' },
       { '<leader>c_', hidden = true },
       { '<leader>d', group = '[D]ocument' },
