@@ -332,13 +332,11 @@ exec_dir_alloc() {
 }
 
 CLONE_DIR=""
-STAGE_DIR=""
 cleanup() {
 	# `return 0` is load-bearing: under `set -e` a trap whose last command
 	# returns non-zero becomes the SCRIPT's exit status, so a clean install would
 	# still report failure and break any `&&` chain or CI gate.
 	[ -n "$CLONE_DIR" ] && rm -rf -- "$CLONE_DIR"
-	[ -n "$STAGE_DIR" ] && rm -rf -- "$STAGE_DIR"
 	if [ -n "$EXEC_ROOT" ]; then
 		case "$EXEC_ROOT" in
 		*/nvim-config-exec.*) rm -rf -- "$EXEC_ROOT" ;;
@@ -687,20 +685,78 @@ replace_distro_nvim() {
 	hash -r 2>/dev/null || true
 }
 
+# nvim_foreign — the first path of the neovim install in $NVIM_PREFIX that root
+# does not own, or nothing. An earlier version of this script unpacked neovim
+# into a user-owned staging directory and `sudo cp -a`'d that onto the prefix,
+# and `cp -a` copies the staging directory's OWN owner and mode onto the target:
+# the user who ran it came to own $NVIM_PREFIX itself, every directory neovim
+# writes into, and the runtime that root's nvim loads — enough to swap
+# /usr/local/sbin, first in sudo's secure_path, for their own. Run as root, the
+# same copy handed all of it to uid 1001, the archive's `runner` owner.
+nvim_foreign() {
+	{
+		find "$NVIM_PREFIX" "$NVIM_PREFIX/bin" "$NVIM_PREFIX/lib" "$NVIM_PREFIX/share" \
+			-maxdepth 0 ! -uid 0 -print -quit 2>/dev/null || :
+		find "$NVIM_PREFIX/bin/nvim" "$NVIM_PREFIX/lib/nvim" "$NVIM_PREFIX/share/nvim/runtime" \
+			! -uid 0 -print -quit 2>/dev/null || :
+	} | head -n 1
+}
+
+# reclaim_prefix_dirs LISTING — root takes back each directory of $NVIM_PREFIX
+# the archive writes into, when someone else owns it. --no-overwrite-dir leaves
+# an existing directory's owner alone, so where the old `cp -a` had handed
+# $NVIM_PREFIX, bin, share, … to a user, that user would otherwise keep them.
+# Directories root already owns (Debian's root:staff 2775 ones included) are
+# not touched.
+reclaim_prefix_dirs() {
+	local -a dirs=() fix=()
+	mapfile -t dirs < <(
+		printf '%s\n' "$NVIM_PREFIX"
+		sed -n 's|^nvim-linux-'"$NVIM_ARCH"'/\(.*[^/]\)/$|'"$NVIM_PREFIX"'/\1|p' <<<"$1"
+	)
+	mapfile -t fix < <(find "${dirs[@]}" -maxdepth 0 -type d ! -uid 0 -print 2>/dev/null || :)
+	[ ${#fix[@]} -gt 0 ] || return 0
+	log "giving ${#fix[@]} director(ies) under $NVIM_PREFIX back to root"
+	if as_root chown root:root -- "${fix[@]}" && as_root chmod 0755 -- "${fix[@]}"; then
+		note "root took back ${#fix[@]} director(ies) under $NVIM_PREFIX that an earlier version of this script had given away. Anything else there that root does not own is not this script's to judge: sudo find $NVIM_PREFIX -xdev ! -uid 0 -ls"
+	else
+		warn "could not give these back to root: ${fix[*]}"
+	fi
+}
+
 install_neovim() {
 	detect_arch
-	local asset url want cur sha dl
+	local asset url want sha dl listing top cur="" foreign=""
 	asset="nvim-linux-${NVIM_ARCH}.tar.gz"
 	url="https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/${asset}"
 	want="${NVIM_VERSION#v}"
 
 	if [ -x "$NVIM_PREFIX/bin/nvim" ]; then
 		cur="$(nvim_version_of "$NVIM_PREFIX/bin/nvim")"
-		if [ "$cur" = "$want" ]; then
+		foreign="$(nvim_foreign)"
+		if [ "$cur" = "$want" ] && [ -z "$foreign" ]; then
 			log "neovim: already $cur at $NVIM_PREFIX/bin/nvim"
 			return 0
 		fi
-		info "neovim ${cur:-unknown} -> $want"
+		if [ -n "$foreign" ]; then
+			warn "root does not own $foreign — reinstalling neovim so that it does"
+		else
+			info "neovim ${cur:-unknown} -> $want"
+		fi
+	fi
+
+	# Everything below writes to $NVIM_PREFIX as root, so ask for root first. A
+	# user without usable sudo still gets the config: this step used to die
+	# half-way and take the config install down with it.
+	if ! as_root true 2>/dev/null; then
+		if [ "$cur" = "$want" ]; then
+			warn "no usable sudo: cannot give $NVIM_PREFIX back to root"
+		else
+			warn "no usable sudo: neovim $want is NOT installed into $NVIM_PREFIX"
+			note "neovim was not installed: it goes into $NVIM_PREFIX, which needs root, and sudo is missing, refused, or wanted a password with no terminal to ask on. Install neovim 0.12+ yourself, or re-run where sudo works (--skip-neovim skips this step)."
+		fi
+		[ -z "$foreign" ] || note "root does not own $foreign, and root runs what is there. As root: chown -R root:root $NVIM_PREFIX/share/nvim $NVIM_PREFIX/lib/nvim $NVIM_PREFIX/bin/nvim && chown root:root $NVIM_PREFIX $NVIM_PREFIX/bin $NVIM_PREFIX/lib $NVIM_PREFIX/share"
+		return 0
 	fi
 
 	mkdir -p -- "$CACHE_DIR/dl"
@@ -728,20 +784,17 @@ install_neovim() {
 		warn "installing neovim $NVIM_VERSION WITHOUT a checksum: neovim publishes no checksum asset, and this repo only records one for $NVIM_PINNED_TAG. Source: $url"
 	fi
 
-	# Extract to a staging dir and check the shape BEFORE anything under
-	# /usr/local is touched, so a truncated or wrong-shaped archive cannot leave a
-	# half-replaced install behind. Extraction needs no exec permission, so this
-	# stays on a plain mktemp -d even where /tmp is noexec.
-	STAGE_DIR="$(mktemp -d)"
-	tar -xzf "$dl" -C "$STAGE_DIR" || die "could not unpack $dl"
-	local src="$STAGE_DIR/nvim-linux-${NVIM_ARCH}"
-	# `-f`, NOT `-x`. `test -x` calls access(X_OK), which is itself noexec-aware:
-	# on a host with /tmp mounted noexec it answers "no" for a perfectly good
-	# binary that simply happens to be sitting on that filesystem, and this check
-	# would reject every download. The mode bits survive the copy either way —
-	# noexec is a property of the mount, not of the inode — so the binary is
-	# executable once it reaches /usr/local.
-	[ -f "$src/bin/nvim" ] || die "$asset does not contain nvim-linux-${NVIM_ARCH}/bin/nvim"
+	# The archive's shape, checked BEFORE anything under $NVIM_PREFIX is touched,
+	# so a truncated or wrong-shaped archive cannot leave a half-replaced install:
+	# the binary is where it belongs, and nothing lies outside the one top-level
+	# directory that --strip-components removes. Read from the listing, not a
+	# staged copy — there is no staged copy any more.
+	top="nvim-linux-${NVIM_ARCH}/"
+	listing="$(tar -tzf "$dl")" || die "could not read $dl"
+	grep -qx "${top}bin/nvim" <<<"$listing" || die "$asset does not contain ${top}bin/nvim"
+	if grep -qv "^${top}" <<<"$listing"; then
+		die "$asset has entries outside ${top}; refusing to unpack it into $NVIM_PREFIX"
+	fi
 
 	# Replace the two subtrees that are exclusively neovim's, so runtime files
 	# dropped by upstream between versions do not linger. Both are under
@@ -749,10 +802,19 @@ install_neovim() {
 	# sysadmin's own runtime files would live — is deliberately left alone.
 	log "installing neovim $want into $NVIM_PREFIX"
 	as_root rm -rf -- "$NVIM_PREFIX/share/nvim/runtime" "$NVIM_PREFIX/lib/nvim/parser" ||
-		die "could not clear the previous neovim runtime (no root?)"
-	as_root cp -a -- "$src/." "$NVIM_PREFIX/" || die "could not install into $NVIM_PREFIX"
-	rm -rf -- "$STAGE_DIR"
-	STAGE_DIR=""
+		die "could not clear the previous neovim runtime"
+	# Unpacked BY ROOT, straight into the prefix, never staged somewhere the
+	# invoking user owns and copied from there (nvim_foreign says what that did):
+	#   --no-same-owner      root's tar otherwise restores the archive's owner,
+	#                        uid 1001, on every file
+	#   --no-overwrite-dir   an existing directory keeps its own owner and mode;
+	#                        $NVIM_PREFIX, bin, share, … are not neovim's
+	# Root's tar also takes the modes from the archive (0755/0644) rather than
+	# from the umask, so a hardened umask 027 no longer locks every other user
+	# out of /usr/local/bin.
+	as_root tar -xzf "$dl" -C "$NVIM_PREFIX" --strip-components=1 --no-same-owner --no-overwrite-dir ||
+		die "could not unpack $dl into $NVIM_PREFIX"
+	reclaim_prefix_dirs "$listing"
 	hash -r 2>/dev/null || true
 	log "neovim: $(nvim_version_of "$NVIM_PREFIX/bin/nvim") at $NVIM_PREFIX/bin/nvim"
 }
