@@ -494,6 +494,11 @@ install_rustup() {
 }
 
 ensure_tree_sitter() {
+	install_tree_sitter_cli
+	publish_tree_sitter
+}
+
+install_tree_sitter_cli() {
 	# Put a cargo-installed CLI on PATH before deciding anything: on a box where
 	# rustup ran with --no-modify-path, ~/.cargo/bin is not on a non-interactive
 	# PATH and the check below would rebuild a CLI that is already there.
@@ -560,19 +565,59 @@ ensure_tree_sitter() {
 		return 0
 	}
 	hash -r 2>/dev/null || true
-
-	# A system-wide handle so `:TSInstall` works in an interactive nvim whose PATH
-	# does not carry ~/.cargo/bin. It points at a binary inside $HOME, which is
-	# worth knowing: anyone who can write $CARGO_HOME/bin decides what
-	# /usr/local/bin/tree-sitter runs. Only created when nothing else answers.
-	if [ ! -e "$NVIM_PREFIX/bin/tree-sitter" ] && [ -x "$CARGO_HOME_DIR/bin/tree-sitter" ]; then
-		if as_root ln -s "$CARGO_HOME_DIR/bin/tree-sitter" "$NVIM_PREFIX/bin/tree-sitter" 2>/dev/null; then
-			note "$NVIM_PREFIX/bin/tree-sitter is a symlink into $CARGO_HOME_DIR/bin (a user-owned path)."
-		else
-			info "could not create $NVIM_PREFIX/bin/tree-sitter (no root?); PATH will have to carry $CARGO_HOME_DIR/bin"
-		fi
-	fi
 	log "tree-sitter: $(tree_sitter_version_of tree-sitter) at $(command -v tree-sitter)"
+}
+
+# publish_tree_sitter — a ROOT-OWNED copy of the pinned CLI at
+# $NVIM_PREFIX/bin/tree-sitter, so `:TSInstall` works in an nvim whose PATH does
+# not carry ~/.cargo/bin, root's included.
+#
+# A copy, never a link. This script used to create
+#     /usr/local/bin/tree-sitter -> ~/.cargo/bin/tree-sitter
+# and root's nvim runs that CLI without being asked: the config builds missing
+# parsers at startup, and linux-devops-tools gives root the same config. The
+# user who owned ~/.cargo/bin therefore decided what ran as root — swapping the
+# link's target for a wrapper logged `tree-sitter build ran as uid=0` 35 times in
+# one root session. A link, or a file root does not own, is replaced for that
+# reason, on every run, including the ones that build nothing.
+publish_tree_sitter() {
+	local dest="$NVIM_PREFIX/bin/tree-sitter" src tmp why=""
+	if [ -L "$dest" ]; then
+		why="it is a symlink -> $(readlink -- "$dest")"
+	elif [ -e "$dest" ] && [ "$(stat -c %u -- "$dest" 2>/dev/null || :)" != 0 ]; then
+		why="root does not own it"
+	elif [ "$(tree_sitter_version_of "$dest")" = "$TREE_SITTER_VERSION" ]; then
+		return 0
+	fi
+
+	src="$(command -v tree-sitter 2>/dev/null || :)"
+	if [ -z "$src" ] || [ "$(tree_sitter_version_of "$src")" != "$TREE_SITTER_VERSION" ]; then
+		# Nothing pinned to put there; an unsafe handle is reported, not deleted,
+		# since removing it takes the CLI away from whoever relies on it.
+		if [ -n "$why" ]; then
+			warn "$dest is unsafe: $why, and root's nvim runs it."
+			note "$dest: $why. Root's nvim runs it; remove it (sudo rm $dest) or re-run this script once the tree-sitter CLI builds."
+		fi
+		return 0
+	fi
+
+	[ -z "$why" ] || warn "$dest: $why — replacing it with a root-owned copy"
+	# Into a temporary name first, then renamed over: rename(2) replaces a symlink
+	# rather than writing through it, and never leaves a half-written binary.
+	tmp="$dest.new.$$"
+	if as_root install -m 0755 -o root -g root -- "$src" "$tmp" 2>/dev/null &&
+		as_root mv -f -- "$tmp" "$dest"; then
+		info "root-owned tree-sitter $TREE_SITTER_VERSION at $dest"
+		return 0
+	fi
+	as_root rm -f -- "$tmp" 2>/dev/null || :
+	if [ -n "$why" ]; then
+		warn "could not replace $dest (no root?) — root's nvim still runs it."
+		note "$dest: $why. Root's nvim runs it; remove it (sudo rm $dest) or re-run this script with sudo available."
+	else
+		info "could not install $dest (no root?); PATH will have to carry $(dirname -- "$src")"
+	fi
+	return 0
 }
 
 # ---------------------------------------------------------------------------
