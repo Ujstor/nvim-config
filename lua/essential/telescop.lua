@@ -1,7 +1,11 @@
 return { -- Fuzzy Finder (files, lsp, etc)
   'nvim-telescope/telescope.nvim',
   event = 'VeryLazy',
-  branch = '0.1.x',
+  -- The latest release, not the 0.1.x branch: that branch stopped at 0.1.8 in
+  -- 2024 and still calls APIs nvim 0.12 removed (vim.lsp.util.jump_to_location,
+  -- make_position_params without an encoding), plus the old nvim-treesitter
+  -- API that treesitter.lua used to shim for it. lazy-lock.json pins the commit.
+  version = '*',
   dependencies = {
     'nvim-lua/plenary.nvim',
     { -- If encountering errors, see telescope-fzf-native README for install instructions
