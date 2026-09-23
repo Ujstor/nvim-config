@@ -385,10 +385,12 @@ pkg_install() { # pkg_install <debian-names...>  (best effort elsewhere)
 	esac
 }
 
-# ensure_runtime_packages — what the CONFIG needs at runtime, nothing more.
-# The compiler/rust build dependencies are NOT here: they are pulled in only when
-# tree-sitter actually has to be built (see ensure_tree_sitter), so a re-run on a
-# box that already has the CLI touches the package manager not at all.
+# ensure_runtime_packages — what the CONFIG needs at runtime, nothing more. That
+# includes a C compiler, because parsers are compiled at runtime. The rest of the
+# toolchain (make, pkg-config, openssl and libclang headers) is NOT here: it is
+# pulled in only when tree-sitter actually has to be built (see
+# ensure_tree_sitter), so a re-run on a box that already has everything touches
+# the package manager not at all.
 ensure_runtime_packages() {
 	local missing=()
 	have git || missing+=(git)
@@ -403,14 +405,39 @@ ensure_runtime_packages() {
 		*) missing+=(fd) ;;
 		esac
 	fi
-	[ ${#missing[@]} -gt 0 ] || {
+	# A C compiler is a RUNTIME need of this config, not only a build one:
+	# nvim-treesitter's main branch compiles every parser on this host with
+	# `tree-sitter build`. Without one every parser failed to build, and the run
+	# still ended in "done".
+	if ! have cc; then
+		case "$PKG" in
+		apt-get) missing+=(build-essential) ;;
+		dnf | yum | zypper) missing+=(gcc) ;;
+		pacman) missing+=(base-devel) ;;
+		apk) missing+=(build-base) ;;
+		esac
+	fi
+	if [ ${#missing[@]} -gt 0 ]; then
+		log "installing prerequisites: ${missing[*]}"
+		pkg_install "${missing[@]}" || warn "could not install: ${missing[*]}"
+	else
 		info "prerequisites: all present"
-		return 0
-	}
-	log "installing prerequisites: ${missing[*]}"
-	pkg_install "${missing[@]}" || warn "could not install: ${missing[*]}"
+	fi
 	have git || die "git is required and could not be installed"
 	have curl || die "curl is required and could not be installed"
+	have cc || note "no C compiler: treesitter parsers cannot be built. Install gcc or clang, then run :TSInstall inside nvim."
+
+	# clang as well where cc is gcc 12 (Debian 12's). Under the -Wall that
+	# `tree-sitter build` passes, gcc 12 spent over 25 minutes and ~2 GB on the
+	# gitcommit parser alone; clang builds the same file in 7 s, and the config
+	# builds parsers with clang whenever it is installed. Asked only after the
+	# install above, which is what put gcc on a fresh box.
+	local ccv
+	ccv="$(cc -dumpversion 2>/dev/null || :)"
+	if [ "${ccv%%.*}" = 12 ] && ! have clang; then
+		log "installing clang (gcc 12 takes 25+ minutes over some treesitter parsers)"
+		pkg_install clang || warn "could not install clang; parsers will be built with gcc 12, slowly"
+	fi
 	return 0
 }
 
